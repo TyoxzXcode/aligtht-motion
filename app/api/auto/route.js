@@ -1,15 +1,18 @@
 // app/api/auto/route.js
 export const dynamic = 'force-dynamic';
+export const maxDuration = 10;
 
 export async function POST(request) {
   try {
-    // 1. Bikin email sementara pakai 1secmail
-    const emailRes = await fetch('https://www.1secmail.com/api/v1/?action=genRandomMailbox&count=1');
-    const emailData = await emailRes.json();
-    const email = emailData[0];
-    const [login, domain] = email.split('@');
+    // 1. Bikin email pakai Guerrilla Mail
+    const mailRes = await fetch('https://api.guerrillamail.com/ajax.php?f=get_email_address&lang=en&site=guerrillamail.com');
+    const mailData = await mailRes.json();
+    const email = mailData.email_addr;
+    const sid = mailData.sid_token;
+    
+    if (!email) throw new Error('Gagal bikin email sementara.');
 
-    // 2. Kirim magic link ke Alight Motion
+    // 2. Kirim magic link ke server Alight Motion
     const amRes = await fetch('https://api.alightmotion.com/v1/auth/magic-link', {
       method: 'POST',
       headers: { 
@@ -19,20 +22,25 @@ export async function POST(request) {
       body: JSON.stringify({ email: email })
     });
 
-    // 3. Nunggu email masuk (maksimal 4 kali cek, total 6 detik)
+    // Kalau API AM udah mati/dipatch, kita lempar error yang jelas
+    if (!amRes.ok) {
+      throw new Error('Server Alight Motion nolak (API mungkin udah dipatch).');
+    }
+
+    // 3. Pantau inbox (maksimal 6 detik biar gak kena limit Vercel)
     let magicLink = null;
     for (let i = 0; i < 4; i++) {
       await new Promise(r => setTimeout(r, 1500));
       
-      const msgsRes = await fetch(`https://www.1secmail.com/api/v1/?action=getMessages&login=${login}&domain=${domain}`);
-      const msgs = await msgsRes.json();
+      const inboxRes = await fetch(`https://api.guerrillamail.com/ajax.php?f=check_email&seq=0&sid_token=${sid}`);
+      const inboxData = await inboxRes.json();
       
-      if (msgs && msgs.length > 0) {
-        const msgId = msgs[0].id;
-        const msgRes = await fetch(`https://www.1secmail.com/api/v1/?action=readMessage&login=${login}&domain=${domain}&id=${msgId}`);
+      if (inboxData.list && inboxData.list.length > 0) {
+        const msgId = inboxData.list[0].mail_id;
+        const msgRes = await fetch(`https://api.guerrillamail.com/ajax.php?f=fetch_email&email_id=${msgId}&sid_token=${sid}`);
         const msgData = await msgRes.json();
         
-        const text = msgData.textBody || (msgData.htmlBody ? msgData.htmlBody.replace(/<[^>]+>/g, '') : '');
+        const text = msgData.mail_body || '';
         const match = text.match(/https:\/\/[^\s"']+oobCode=[^\s"']+/);
         
         if (match) {
@@ -42,19 +50,20 @@ export async function POST(request) {
       }
     }
 
-    if (!magicLink) throw new Error('Email lambat masuk atau dibatalin AM.');
+    if (!magicLink) throw new Error('Email lambat masuk ke inbox.');
 
-    // 4. Verifikasi link
+    // 4. Verifikasi link ke Alight Motion
     const verifyRes = await fetch('https://api.alightmotion.com/v1/auth/verify-link', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ link: magicLink })
     });
     
+    if (!verifyRes.ok) throw new Error('Link gak valid / expired.');
     const verifyData = await verifyRes.json();
 
-    // 5. Kirim hasil ke web
-    return new Response(JSON.stringify({ 
+    // 5. Balikin data sukses
+    return Response.json({ 
         success: true, 
         data: {
             email: email,
@@ -63,12 +72,10 @@ export async function POST(request) {
             status: 'PREMIUM ACTIVE',
             validUntil: 'SELAMANYA'
         } 
-    }), { headers: { 'Content-Type': 'application/json' } });
+    });
 
   } catch (err) {
-    return new Response(JSON.stringify({ success: false, message: err.message }), { 
-      status: 500,
-      headers: { 'Content-Type': 'application/json' } 
-    });
+    // INI KUNCINYA: Biar web gak crash 500, kita balikin pesan error rapi
+    return Response.json({ success: false, message: err.message }, { status: 200 });
   }
-      }
+}
