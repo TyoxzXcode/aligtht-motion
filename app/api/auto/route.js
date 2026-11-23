@@ -1,13 +1,13 @@
-// api/auto.js (Vercel Serverless Function)
-module.exports = async (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  if (req.method === 'OPTIONS') return res.status(200).end();
+// app/api/auto/route.js
+import { NextResponse } from 'next/server';
+import axios from 'axios';
 
+export async function POST(request) {
   try {
-    // 1. Ambil domain dari mail.gw (pengganti mail.tm)
-    const domainRes = await fetch('https://api.mail.gw/domains');
-    const domainData = await domainRes.json();
+    // 1. Ambil domain dari mail.gw
+    const domainRes = await axios.get('https://api.mail.gw/domains');
+    const domainData = domainRes.data;
+    
     if (!domainData['hydra:member'] || domainData['hydra:member'].length === 0) {
         throw new Error('Gagal dapet domain email dari mail.gw');
     }
@@ -18,52 +18,38 @@ module.exports = async (req, res) => {
     const pass = 'Password123!';
 
     // 3. Daftar akun email
-    const regRes = await fetch('https://api.mail.gw/accounts', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ address: email, password: pass })
-    });
-    if (!regRes.ok) throw new Error('Gagal bikin email sementara');
-
+    await axios.post('https://api.mail.gw/accounts', { address: email, password: pass });
+    
     // 4. Login buat dapet token
-    const loginRes = await fetch('https://api.mail.gw/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ address: email, password: pass })
-    });
-    const loginData = await loginRes.json();
-    const token = loginData.token;
+    const loginRes = await axios.post('https://api.mail.gw/token', { address: email, password: pass });
+    const token = loginRes.data.token;
 
-    // 5. Minta magic link ke server Alight Motion
-    // (Sesuaikan endpoint ini kalau di repo aslinya beda)
-    const amRes = await fetch('https://api.alightmotion.com/v1/auth/magic-link', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'User-Agent': 'AlightMotion/5.0.0'
-      },
-      body: JSON.stringify({ email: email })
-    });
-
-    if (!amRes.ok) throw new Error('Alight Motion nolak kirim link');
+    // 5. Minta magic link ke Alight Motion
+    // (Asumsi endpoint ini sesuai sama repo aslinya, kalau beda sesuaikan)
+    const amRes = await axios.post('https://api.alightmotion.com/v1/auth/magic-link', 
+      { email: email },
+      { headers: { 'Content-Type': 'application/json', 'User-Agent': 'AlightMotion/5.0.0' } }
+    );
 
     // 6. Polling nunggu email masuk (maks 20x cek, jeda 3 detik)
     let magicLink = null;
     for (let i = 0; i < 20; i++) {
       await new Promise(r => setTimeout(r, 3000));
-      const msgsRes = await fetch('https://api.mail.gw/messages', {
+      
+      const msgsRes = await axios.get('https://api.mail.gw/messages', {
         headers: { 'Authorization': 'Bearer ' + token }
       });
-      const msgs = await msgsRes.json();
+      const msgs = msgsRes.data;
       
       if (msgs['hydra:member'] && msgs['hydra:member'].length > 0) {
         const msgId = msgs['hydra:member'][0].id;
-        const msgRes = await fetch('https://api.mail.gw/messages/' + msgId, {
+        const msgRes = await axios.get('https://api.mail.gw/messages/' + msgId, {
           headers: { 'Authorization': 'Bearer ' + token }
         });
-        const msgData = await msgRes.json();
+        const msgData = msgRes.data;
         const text = msgData.text || (msgData.html && msgData.html[0]) || '';
         const match = text.match(/https:\/\/[^\s"']+oobCode=[^\s"']+/);
+        
         if (match) {
           magicLink = match[0];
           break;
@@ -73,18 +59,16 @@ module.exports = async (req, res) => {
 
     if (!magicLink) throw new Error('Link verifikasi gak masuk ke email.');
 
-    // 7. Verifikasi link ke Alight Motion buat dapet Premium
-    const verifyRes = await fetch('https://api.alightmotion.com/v1/auth/verify-link', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ link: magicLink })
-    });
+    // 7. Verifikasi link ke Alight Motion
+    const verifyRes = await axios.post('https://api.alightmotion.com/v1/auth/verify-link', 
+      { link: magicLink },
+      { headers: { 'Content-Type': 'application/json' } }
+    );
     
-    const verifyData = await verifyRes.json();
-    if (!verifyRes.ok) throw new Error('Link expired atau udah dipake.');
+    const verifyData = verifyRes.data;
 
     // 8. Balikin data sukses ke web lu
-    res.status(200).json({ 
+    return NextResponse.json({ 
         success: true, 
         data: {
             email: email,
@@ -96,6 +80,6 @@ module.exports = async (req, res) => {
     });
 
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    return NextResponse.json({ success: false, message: err.message }, { status: 500 });
   }
-};
+  }
