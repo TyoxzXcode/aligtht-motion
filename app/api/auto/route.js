@@ -1,46 +1,38 @@
 // app/api/auto/route.js
-import { NextResponse } from 'next/server';
-import axios from 'axios';
-
-export const maxDuration = 10; // Batas maksimal Vercel
+export const dynamic = 'force-dynamic';
 
 export async function POST(request) {
   try {
-    // 1. Ambil domain dari mail.gw
-    const domainRes = await axios.get('https://api.mail.gw/domains');
-    const domain = domainRes.data['hydra:member'][0].domain;
+    // 1. Bikin email sementara pakai 1secmail
+    const emailRes = await fetch('https://www.1secmail.com/api/v1/?action=genRandomMailbox&count=1');
+    const emailData = await emailRes.json();
+    const email = emailData[0];
+    const [login, domain] = email.split('@');
 
-    // 2. Bikin email
-    const email = Math.random().toString(36).substring(2, 10) + '@' + domain;
-    const pass = 'Password123!';
+    // 2. Kirim magic link ke Alight Motion
+    const amRes = await fetch('https://api.alightmotion.com/v1/auth/magic-link', {
+      method: 'POST',
+      headers: { 
+        'Content-Type': 'application/json', 
+        'User-Agent': 'AlightMotion/5.0.0' 
+      },
+      body: JSON.stringify({ email: email })
+    });
 
-    // 3. Daftar & Login
-    await axios.post('https://api.mail.gw/accounts', { address: email, password: pass });
-    const loginRes = await axios.post('https://api.mail.gw/token', { address: email, password: pass });
-    const token = loginRes.data.token;
-
-    // 4. Kirim magic link ke email
-    await axios.post('https://api.alightmotion.com/v1/auth/magic-link', 
-      { email: email },
-      { headers: { 'Content-Type': 'application/json', 'User-Agent': 'AlightMotion/5.0.0' } }
-    );
-
-    // 5. Polling kilat (maksimal 4x cek, jeda 1.5 detik = 6 detik total)
+    // 3. Nunggu email masuk (maksimal 4 kali cek, total 6 detik)
     let magicLink = null;
     for (let i = 0; i < 4; i++) {
       await new Promise(r => setTimeout(r, 1500));
       
-      const msgsRes = await axios.get('https://api.mail.gw/messages', {
-        headers: { 'Authorization': 'Bearer ' + token }
-      });
-      const msgs = msgsRes.data;
+      const msgsRes = await fetch(`https://www.1secmail.com/api/v1/?action=getMessages&login=${login}&domain=${domain}`);
+      const msgs = await msgsRes.json();
       
-      if (msgs['hydra:member'] && msgs['hydra:member'].length > 0) {
-        const msgId = msgs['hydra:member'][0].id;
-        const msgRes = await axios.get('https://api.mail.gw/messages/' + msgId, {
-          headers: { 'Authorization': 'Bearer ' + token }
-        });
-        const text = msgRes.data.text || (msgRes.data.html && msgRes.data.html[0]) || '';
+      if (msgs && msgs.length > 0) {
+        const msgId = msgs[0].id;
+        const msgRes = await fetch(`https://www.1secmail.com/api/v1/?action=readMessage&login=${login}&domain=${domain}&id=${msgId}`);
+        const msgData = await msgRes.json();
+        
+        const text = msgData.textBody || (msgData.htmlBody ? msgData.htmlBody.replace(/<[^>]+>/g, '') : '');
         const match = text.match(/https:\/\/[^\s"']+oobCode=[^\s"']+/);
         
         if (match) {
@@ -50,26 +42,33 @@ export async function POST(request) {
       }
     }
 
-    if (!magicLink) throw new Error('Email lambat masuk, coba klik lagi.');
+    if (!magicLink) throw new Error('Email lambat masuk atau dibatalin AM.');
 
-    // 6. Verifikasi premium
-    const verifyRes = await axios.post('https://api.alightmotion.com/v1/auth/verify-link', 
-      { link: magicLink },
-      { headers: { 'Content-Type': 'application/json' } }
-    );
+    // 4. Verifikasi link
+    const verifyRes = await fetch('https://api.alightmotion.com/v1/auth/verify-link', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ link: magicLink })
+    });
     
-    return NextResponse.json({ 
+    const verifyData = await verifyRes.json();
+
+    // 5. Kirim hasil ke web
+    return new Response(JSON.stringify({ 
         success: true, 
         data: {
             email: email,
-            uid: verifyRes.data.uid || '—',
-            orderId: verifyRes.data.orderId || '—',
+            uid: verifyData.uid || '—',
+            orderId: verifyData.orderId || '—',
             status: 'PREMIUM ACTIVE',
             validUntil: 'SELAMANYA'
         } 
-    });
+    }), { headers: { 'Content-Type': 'application/json' } });
 
   } catch (err) {
-    return NextResponse.json({ success: false, message: err.message }, { status: 500 });
+    return new Response(JSON.stringify({ success: false, message: err.message }), { 
+      status: 500,
+      headers: { 'Content-Type': 'application/json' } 
+    });
   }
-}
+      }
