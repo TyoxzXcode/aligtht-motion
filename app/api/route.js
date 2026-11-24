@@ -1,18 +1,28 @@
-const express = require('express');
-const statusRoute = require('./status/route');
-const sendLinkRoute = require('./send-link/route');
-const verifyLinkRoute = require('./verify-link/route');
-const statsRoute = require('./stats/route');
-const emailRoute = require('./email/route');
-const autoRoute = require('./auto/route');
+import { NextResponse } from 'next/server';
 
-const router = express.Router();
+export async function GET(request) {
+  const { searchParams } = new URL(request.url);
+  const targetUrl = searchParams.get('url');
 
-router.use('/status', statusRoute);
-router.use('/send-link', sendLinkRoute);
-router.use('/verify-link', verifyLinkRoute);
-router.use('/stats', statsRoute);
-router.use('/email', emailRoute);
-router.use('/auto', autoRoute);
+  if (!targetUrl) return NextResponse.json({ error: 'URL kosong' }, { status: 400 });
 
-module.exports = router;
+  try {
+    const res = await fetch(targetUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0' }
+    });
+    
+    // Ambil sebagai teks dulu
+    const text = await res.text();
+    let data;
+    try {
+        data = JSON.parse(text);
+    } catch (e) {
+        // Kalau API balikin HTML (misal error 502), lempar teksnya biar web lu bisa baca
+        return NextResponse.json({ error: 'API Balikin HTML', detail: text.substring(0, 50) }, { status: 500 });
+    }
+    
+    return NextResponse.json(data);
+  } catch (err) {
+    return NextResponse.json({ error: err.message }, { status: 500 });
+  }
+}
